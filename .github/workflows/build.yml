@@ -366,6 +366,65 @@ jobs:
             src-tauri/target/${{ steps.build-profile.outputs.profile }}/bundle/rpm/*.rpm
           retention-days: 30
 
+      - name: Assemble portable ZIP (Windows)
+        if: contains(inputs.platform, 'windows')
+        shell: pwsh
+        run: |
+          $version = "${{ steps.get-version.outputs.version }}"
+          # Resolve the build output directory (default target vs cross-compiled)
+          $target = "${{ inputs.target }}"
+          $profile = "${{ steps.build-profile.outputs.profile }}"
+          if ($target -and $target -ne "x86_64-pc-windows-msvc") {
+            $buildDir = "src-tauri/target/$target/$profile"
+          } else {
+            $buildDir = "src-tauri/target/$profile"
+          }
+
+          $portableRoot = "HandyPortable"
+
+          # Create directory structure
+          New-Item -ItemType Directory -Force -Path "$portableRoot/App/Handy" | Out-Null
+          New-Item -ItemType Directory -Force -Path "$portableRoot/Data" | Out-Null
+
+          # Copy built binary and resources
+          Copy-Item "$buildDir/Handy.exe" "$portableRoot/App/Handy/"
+          if (Test-Path "$buildDir/resources") {
+            Copy-Item "$buildDir/resources" "$portableRoot/App/Handy/resources" -Recurse
+          }
+
+          # Copy both launchers and config files from repo
+          Copy-Item "portable/HandyPortable.exe" "$portableRoot/"
+          Copy-Item "portable/HandyPortable.cmd" "$portableRoot/"
+          Copy-Item "portable/AppInfo" "$portableRoot/App/AppInfo" -Recurse
+
+          # Determine arch suffix from target triple
+          if ($target -match "aarch64") {
+            $arch = "arm64"
+          } else {
+            $arch = "x64"
+          }
+
+          $zipName = "Handy_${version}_windows-${arch}_portable.zip"
+          Compress-Archive -Path "$portableRoot/*" -DestinationPath $zipName
+          Write-Output "portable-zip=$zipName" >> $env:GITHUB_OUTPUT
+          Write-Output "Portable ZIP created: $zipName"
+
+      - name: Upload portable ZIP to release (Windows)
+        if: contains(inputs.platform, 'windows') && inputs.release-id != ''
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="${{ steps.get-version.outputs.version }}"
+          TARGET="${{ inputs.target }}"
+          if [[ "$TARGET" == *"aarch64"* ]]; then
+            ARCH="arm64"
+          else
+            ARCH="x64"
+          fi
+          ZIP_NAME="Handy_${VERSION}_windows-${ARCH}_portable.zip"
+          gh release upload "v${VERSION}" "$ZIP_NAME" --clobber
+
       - name: Upload artifacts (Windows)
         if: inputs.upload-artifacts && contains(inputs.platform, 'windows')
         uses: actions/upload-artifact@v4
@@ -375,4 +434,5 @@ jobs:
           path: |
             src-tauri/target/${{ inputs.target != '' && inputs.target != 'x86_64-pc-windows-msvc' && format('{0}/{1}', inputs.target, steps.build-profile.outputs.profile) || steps.build-profile.outputs.profile }}/bundle/msi/*.msi
             src-tauri/target/${{ inputs.target != '' && inputs.target != 'x86_64-pc-windows-msvc' && format('{0}/{1}', inputs.target, steps.build-profile.outputs.profile) || steps.build-profile.outputs.profile }}/bundle/nsis/*.exe
+            Handy_*_portable.zip
           retention-days: 30
