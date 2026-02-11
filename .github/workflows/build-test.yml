@@ -11,7 +11,7 @@ jobs:
       matrix:
         include:
           - platform: "windows-latest"
-            args: "--no-sign"
+            args: '--no-sign --config {"bundle":{"createUpdaterArtifacts":false}}'
             target: "x86_64-pc-windows-msvc"
 
     uses: ./.github/workflows/build.yml
