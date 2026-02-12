@@ -371,7 +371,6 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ steps.get-version.outputs.version }}"
-          # Resolve the build output directory (default target vs cross-compiled)
           $target = "${{ inputs.target }}"
           $profile = "${{ steps.build-profile.outputs.profile }}"
           if ($target -and $target -ne "x86_64-pc-windows-msvc") {
@@ -382,31 +381,20 @@ jobs:
 
           $portableRoot = "HandyPortable"
 
-          # Create directory structure
-          New-Item -ItemType Directory -Force -Path "$portableRoot/App/Handy" | Out-Null
-          New-Item -ItemType Directory -Force -Path "$portableRoot/Data" | Out-Null
+          # Create directory structure: exe + resources + marker file
+          New-Item -ItemType Directory -Force -Path "$portableRoot" | Out-Null
 
-          # Copy built binary and resources
-          Copy-Item "$buildDir/Handy.exe" "$portableRoot/App/Handy/"
+          Copy-Item "$buildDir/Handy.exe" "$portableRoot/"
           if (Test-Path "$buildDir/resources") {
-            Copy-Item "$buildDir/resources" "$portableRoot/App/Handy/resources" -Recurse
+            Copy-Item "$buildDir/resources" "$portableRoot/resources" -Recurse
           }
 
-          # Copy both launchers and config files from repo
-          Copy-Item "portable/HandyPortable.exe" "$portableRoot/"
-          Copy-Item "portable/HandyPortable.cmd" "$portableRoot/"
-          Copy-Item "portable/AppInfo" "$portableRoot/App/AppInfo" -Recurse
+          # The marker file triggers portable mode in the Rust binary
+          New-Item -ItemType File -Path "$portableRoot/portable" | Out-Null
 
-          # Determine arch suffix from target triple
-          if ($target -match "aarch64") {
-            $arch = "arm64"
-          } else {
-            $arch = "x64"
-          }
-
+          if ($target -match "aarch64") { $arch = "arm64" } else { $arch = "x64" }
           $zipName = "Handy_${version}_windows-${arch}_portable.zip"
           Compress-Archive -Path "$portableRoot/*" -DestinationPath $zipName
-          Write-Output "portable-zip=$zipName" >> $env:GITHUB_OUTPUT
           Write-Output "Portable ZIP created: $zipName"
 
       - name: Upload portable ZIP to release (Windows)
