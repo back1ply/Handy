@@ -4,14 +4,13 @@ use crate::settings::TypingTool;
 use crate::settings::{get_settings, AutoSubmitKey, ClipboardHandling, PasteMethod};
 use enigo::{Direction, Enigo, Key, Keyboard};
 use log::info;
+use std::process::Command;
 use std::time::Duration;
 use tauri::{AppHandle, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
 #[cfg(target_os = "linux")]
 use crate::utils::{is_kde_wayland, is_wayland};
-#[cfg(target_os = "linux")]
-use std::process::Command;
 
 /// Pastes text using the clipboard: saves current content, writes text, sends paste keystroke, restores clipboard.
 fn paste_via_clipboard(
@@ -20,9 +19,18 @@ fn paste_via_clipboard(
     app_handle: &AppHandle,
     paste_method: &PasteMethod,
     paste_delay_ms: u64,
+    paste_delay_after_ms: u64,
 ) -> Result<(), String> {
     let clipboard = app_handle.clipboard();
-    let clipboard_content = clipboard.read_text().unwrap_or_default();
+    let saved_text = clipboard.read_text().ok().filter(|t| !t.is_empty());
+    // Only probe for an image when there is no text to restore. Text is by far the
+    // common case, and reading an image decodes the full bitmap, so this keeps the
+    // text path exactly as cheap as it was before.
+    let saved_image = if saved_text.is_none() {
+        clipboard.read_image().ok().map(|image| image.to_owned())
+    } else {
+        None
+    };
 
     // Write text to clipboard first
     // On Wayland, prefer wl-copy for better compatibility (especially with umlauts)
@@ -62,19 +70,30 @@ fn paste_via_clipboard(
         }
     }
 
-    std::thread::sleep(std::time::Duration::from_millis(50));
+    std::thread::sleep(Duration::from_millis(paste_delay_after_ms));
 
-    // Restore original clipboard content
-    // On Wayland, prefer wl-copy for better compatibility
-    #[cfg(target_os = "linux")]
-    if is_wayland() && is_wl_copy_available() {
-        let _ = write_clipboard_via_wl_copy(&clipboard_content);
-    } else {
+    // Restore original clipboard content.
+    // Text takes priority so this path stays identical to the previous behavior;
+    // an image is only restored when the clipboard held no text at all, which is
+    // the case that used to silently wipe screenshots.
+    if let Some(clipboard_content) = saved_text {
+        // On Wayland, prefer wl-copy for better compatibility
+        #[cfg(target_os = "linux")]
+        if is_wayland() && is_wl_copy_available() {
+            let _ = write_clipboard_via_wl_copy(&clipboard_content);
+        } else {
+            let _ = clipboard.write_text(&clipboard_content);
+        }
+
+        #[cfg(not(target_os = "linux"))]
         let _ = clipboard.write_text(&clipboard_content);
+    } else if let Some(image) = saved_image {
+        info!("Restoring image to clipboard");
+        let _ = clipboard.write_image(&image);
+    } else {
+        // Nothing was there to begin with — don't leave the transcription behind.
+        let _ = clipboard.clear();
     }
-
-    #[cfg(not(target_os = "linux"))]
-    let _ = clipboard.write_text(&clipboard_content);
 
     Ok(())
 }
@@ -500,6 +519,31 @@ fn send_key_combo_via_xdotool(paste_method: &PasteMethod) -> Result<(), String> 
     Ok(())
 }
 
+/// Pastes text by invoking an external script.
+/// The script receives the text to paste as a single argument.
+fn paste_via_external_script(text: &str, script_path: &str) -> Result<(), String> {
+    info!("Pasting via external script: {}", script_path);
+
+    let output = Command::new(script_path)
+        .arg(text)
+        .output()
+        .map_err(|e| format!("Failed to execute external script '{}': {}", script_path, e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        return Err(format!(
+            "External script '{}' failed with exit code {:?}. stderr: {}, stdout: {}",
+            script_path,
+            output.status.code(),
+            stderr.trim(),
+            stdout.trim()
+        ));
+    }
+
+    Ok(())
+}
+
 /// Types text directly by simulating individual key presses.
 fn paste_direct(
     enigo: &mut Enigo,
@@ -568,6 +612,7 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
     let settings = get_settings(&app_handle);
     let paste_method = settings.paste_method;
     let paste_delay_ms = settings.paste_delay_ms;
+    let paste_delay_after_ms = settings.paste_delay_after_ms;
 
     // Append trailing space if setting is enabled
     let text = if settings.append_trailing_space {
@@ -577,8 +622,8 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
     };
 
     info!(
-        "Using paste method: {:?}, delay: {}ms",
-        paste_method, paste_delay_ms
+        "Using paste method: {:?}, delay before: {}ms, delay after: {}ms",
+        paste_method, paste_delay_ms, paste_delay_after_ms
     );
 
     // Get the managed Enigo instance
@@ -610,7 +655,16 @@ pub fn paste(text: String, app_handle: AppHandle) -> Result<(), String> {
                 &app_handle,
                 &paste_method,
                 paste_delay_ms,
+                paste_delay_after_ms,
             )?
+        }
+        PasteMethod::ExternalScript => {
+            let script_path = settings
+                .external_script_path
+                .as_ref()
+                .filter(|p| !p.is_empty())
+                .ok_or("External script path is not configured")?;
+            paste_via_external_script(&text, script_path)?;
         }
     }
 
